@@ -15,8 +15,10 @@ Commands:
   python scout.py test-notify   send a test message to your phone
   python scout.py stats         print what's in the database
 """
+import email.utils
 import hashlib
 import html
+import html.entities
 import json
 import logging
 import math
@@ -61,6 +63,7 @@ class Cfg:
     breaking_score = env("BREAKING_SCORE", 8.5, float)
     batch_size = env("AI_BATCH_SIZE", 20, int)
     max_ai_items_per_run = env("AI_MAX_ITEMS_PER_RUN", 60, int)
+    max_age_days = env("MAX_AGE_DAYS", 14, int)       # ignore stories older than this
     telegram_token = env("TELEGRAM_BOT_TOKEN")
     telegram_chat = env("TELEGRAM_CHAT_ID")
     ntfy_url = env("NTFY_URL")              # e.g. https://ntfy.sh/my-secret-topic
@@ -119,7 +122,23 @@ def db_connect(path):
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    _normalize_old_dates(con)
     return con
+
+
+def _normalize_old_dates(con):
+    """v1 stored raw RSS dates; convert them to ISO so age checks work."""
+    rows = con.execute(
+        "SELECT id, event_time FROM items WHERE event_time IS NOT NULL AND event_time NOT LIKE '____-__-__T%'"
+    ).fetchall()
+    for r in rows:
+        con.execute("UPDATE items SET event_time=? WHERE id=?", (parse_date(r["event_time"]), r["id"]))
+    if rows:
+        con.commit()
+
+
+def fresh_cutoff():
+    return iso(now_utc() - timedelta(days=Cfg.max_age_days))
 
 
 def meta_get(con, k, default=None):
@@ -187,9 +206,48 @@ def _local(tag):
     return tag.rsplit("}", 1)[-1].lower() if isinstance(tag, str) else ""
 
 
+def parse_date(s):
+    """RFC 822 (RSS) or ISO 8601 (Atom) -> ISO UTC string, or None."""
+    if not s:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(s)
+    except (TypeError, ValueError, IndexError):
+        try:
+            dt = datetime.fromisoformat(s.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return iso(dt)
+
+
+_XML_ENTITIES = {"amp", "lt", "gt", "quot", "apos"}
+
+
+def repair_xml(raw):
+    """Fix the usual broken-feed sins: bare '&' and HTML-only entities like &nbsp;."""
+    text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+
+    def fix(m):
+        name = m.group(1)
+        if name in _XML_ENTITIES:
+            return m.group(0)
+        cp = html.entities.name2codepoint.get(name)
+        return f"&#{cp};" if cp else f"&amp;{name};"
+
+    text = re.sub(r"&([A-Za-z][A-Za-z0-9]*);", fix, text)
+    text = re.sub(r"&(?!(?:[A-Za-z][A-Za-z0-9]*|#\d+|#x[0-9A-Fa-f]+);)", "&amp;", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    return text.encode("utf-8")
+
+
 def parse_rss(raw, feed):
     """Handles RSS 2.0, Atom and GeoRSS/GDACS extras without knowing namespaces."""
-    root = ET.fromstring(raw)
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        root = ET.fromstring(repair_xml(raw))
     out = []
     for el in root.iter():
         if _local(el.tag) not in ("item", "entry"):
@@ -225,7 +283,8 @@ def parse_rss(raw, feed):
             "source": feed["name"], "kind": feed["kind"],
             "title": title, "summary": (summary + (" [" + ", ".join(extra) + "]" if extra else "")).strip(),
             "url": link, "lat": lat, "lon": lon, "mag": None, "depth": None,
-            "event_time": fields.get("pubdate") or fields.get("published") or fields.get("updated"),
+            "event_time": parse_date(fields.get("pubdate") or fields.get("published")
+                                     or fields.get("updated") or fields.get("date")),
             "_alertlevel": (fields.get("alertlevel") or "").lower(),
             "_eventtype": (fields.get("eventtype") or "").upper(),
         })
@@ -275,6 +334,14 @@ def hard_filter(con, it):
     """Return (passed, reason). Cheap rules that remove ~80-90% before any AI cost."""
     kind = it["kind"]
     text = f"{it.get('title', '')} {it.get('summary', '')}"
+
+    if it.get("event_time"):
+        try:
+            age = now_utc() - datetime.strptime(it["event_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            if age > timedelta(days=Cfg.max_age_days):
+                return False, f"older than {Cfg.max_age_days} days"
+        except ValueError:
+            pass
 
     if kind == "quake":
         mag, depth = it.get("mag") or 0, it.get("depth")
@@ -466,8 +533,9 @@ def send_breaking(con):
     rows = con.execute(
         "SELECT * FROM items WHERE scored=1 AND notified=0 AND kind IN ('quake','gdacs','volcano') "
         # location doesn't matter for breaking: a mid-Atlantic doublet is still a 30X video
-        "AND (0.55*hook + 0.45*explainable)>=? AND first_seen>=? ORDER BY score DESC",
-        (Cfg.breaking_score, iso(now_utc() - timedelta(hours=12))),
+        "AND (0.55*hook + 0.45*explainable)>=? AND first_seen>=? "
+        "AND (event_time IS NULL OR event_time>=?) ORDER BY score DESC",
+        (Cfg.breaking_score, iso(now_utc() - timedelta(hours=12)), iso(now_utc() - timedelta(days=3))),
     ).fetchall()
     for r in rows:
         try:
@@ -485,8 +553,8 @@ def send_digest(con, force=False):
         return False
     rows = con.execute(
         "SELECT * FROM items WHERE scored=1 AND notified=0 AND score>=? AND first_seen>=? "
-        "ORDER BY score DESC LIMIT ?",
-        (Cfg.min_score, iso(now_utc() - timedelta(hours=36)), Cfg.top_n),
+        "AND (event_time IS NULL OR event_time>=?) ORDER BY score DESC LIMIT ?",
+        (Cfg.min_score, iso(now_utc() - timedelta(hours=36)), fresh_cutoff(), Cfg.top_n),
     ).fetchall()
     failed = json.loads(meta_get(con, "failed_feeds", "[]"))
     if rows:
@@ -529,6 +597,10 @@ def store_and_filter(con, items):
     items = sorted(items, key=lambda x: (x["kind"] != "quake", x.get("event_time") or ""))
     for it in items:
         if con.execute("SELECT 1 FROM items WHERE id=?", (it["id"],)).fetchone():
+            continue
+        # same story carried by two feeds (e.g. two ScienceDaily sections) -> keep the first
+        if it["kind"] != "quake" and it.get("title") and con.execute(
+                "SELECT 1 FROM items WHERE lower(title)=lower(?)", (it["title"],)).fetchone():
             continue
         con.execute(
             "INSERT INTO items(id,source,kind,title,summary,url,lat,lon,mag,depth,event_time,first_seen) "
