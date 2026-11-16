@@ -1,0 +1,18 @@
+[
+  {"name": "USGS M4.5+ past day", "kind": "quake", "format": "usgs",
+   "url": "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson"},
+  {"name": "GDACS disaster alerts", "kind": "gdacs", "format": "rss",
+   "url": "https://www.gdacs.org/xml/rss.xml"},
+  {"name": "Smithsonian GVP weekly volcano report", "kind": "volcano", "format": "rss",
+   "url": "https://volcano.si.edu/news/WeeklyVolcanoRSS.xml"},
+  {"name": "NSIDC Arctic Sea Ice News", "kind": "trusted", "format": "rss",
+   "url": "https://nsidc.org/arcticseaicenews/feed/"},
+  {"name": "ScienceDaily Earth & Climate", "kind": "science", "format": "rss",
+   "url": "https://www.sciencedaily.com/rss/earth_climate.xml"},
+  {"name": "ScienceDaily Geology", "kind": "science", "format": "rss",
+   "url": "https://www.sciencedaily.com/rss/earth_climate/geology.xml"},
+  {"name": "Phys.org Earth news", "kind": "science", "format": "rss",
+   "url": "https://phys.org/rss-feed/earth-news/"},
+  {"name": "NASA Earth Observatory", "kind": "science", "format": "rss",
+   "url": "https://earthobservatory.nasa.gov/feeds/image-of-the-day.rss"}
+]

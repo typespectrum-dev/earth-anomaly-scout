@@ -1,0 +1,23 @@
+services:
+  scout:
+    build: .
+    restart: unless-stopped
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - SCOUT_MODEL=${SCOUT_MODEL}
+      - SCOUT_FALLBACK_MODEL=${SCOUT_FALLBACK_MODEL}
+      - SCOUT_TZ=${SCOUT_TZ:-America/Los_Angeles}
+      - DIGEST_HOUR=${DIGEST_HOUR:-7}
+      - SCAN_EVERY_MIN=${SCAN_EVERY_MIN:-180}
+      - DIGEST_TOP_N=${DIGEST_TOP_N:-5}
+      - DIGEST_MIN_SCORE=${DIGEST_MIN_SCORE:-6}
+      - BREAKING_SCORE=${BREAKING_SCORE:-8.5}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - NTFY_URL=${NTFY_URL}
+      - NTFY_TOKEN=${NTFY_TOKEN}
+    volumes:
+      - scout-data:/data
+
+volumes:
+  scout-data:
